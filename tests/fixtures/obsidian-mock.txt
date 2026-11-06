@@ -1,0 +1,20 @@
+class Element {
+ constructor(tag = 'root', text = '') { this.tag = tag; this.text = text; this.children = []; }
+ empty() { this.children = []; }
+ createEl(tag, options = {}) { const el = new Element(tag, options.text || ''); this.children.push(el); return el; }
+ createDiv() { return this.createEl('div'); }
+ createSpan(options) { return this.createEl('span', options); }
+ setAttribute() {}
+}
+class Modal {
+ constructor(app) { this.app = app; this.contentEl = new Element(); this.closed = false; }
+ close() { this.closed = true; this.onClose(); }
+}
+Modal.notices = [];
+class Notice { constructor(message) { Modal.notices.push(message); } }
+const { parse } = require('yaml');
+function getFrontMatterInfo(text) {
+ const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+ return match ? { exists: true, frontmatter: match[1] } : { exists: false, frontmatter: '' };
+}
+module.exports = { Modal, Notice, getFrontMatterInfo, parseYaml: parse, normalizePath: path => path.replace(/\/{2,}/g, '/') };

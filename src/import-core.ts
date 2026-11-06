@@ -1,4 +1,6 @@
 import Papa from 'papaparse';
+import { validateCsvHeaders } from './csv-validation';
+import { parseJsonUniqueKeys } from './json-validation';
 
 export type Row = Record<string, unknown>;
 
@@ -39,13 +41,14 @@ function validateValue(value: unknown, field: string, row: number): void {
  if (Array.isArray(value) && value.every(item => typeof item === 'string')) return;
  throw new Error(`Row ${row}, field ${JSON.stringify(field)}: use a scalar, null, or a list of text; nested objects and other lists are not supported.`);
 }
-export function parseInput(text: string, name: string): Row[] {
+export function parseInput(text: string, name: string, options: { inferCsv?: boolean } = {}): Row[] {
  let rows: unknown;
  if (name.toLowerCase().endsWith('.csv')) {
-  const result = Papa.parse<Row>(text, {header:true, skipEmptyLines:'greedy'});
+  validateCsvHeaders(text);
+  const result = Papa.parse<Row>(text, {header:true, delimiter:',', skipEmptyLines:'greedy'});
   if (result.errors.length) throw new Error(result.errors.map(e => `Row ${e.row ?? '?'}: ${e.message}`).join('\n'));
-  rows = result.data.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, infer(value)])));
- } else if (name.toLowerCase().endsWith('.json')) { validateJsonNumbers(text); rows = JSON.parse(text); }
+  rows = options.inferCsv === false ? result.data : result.data.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, infer(value)])));
+ } else if (name.toLowerCase().endsWith('.json')) { validateJsonNumbers(text); rows = parseJsonUniqueKeys(text); }
  else throw new Error('Choose a CSV or JSON file.');
  if (!Array.isArray(rows) || rows.some(r => !r || typeof r !== 'object' || Array.isArray(r))) throw new Error('Expected an array of objects.');
  if (!rows.length) throw new Error('The file contains no records.');
@@ -63,20 +66,29 @@ export function infer(value: unknown): unknown {
 export function validateMapping(fields: string[], names: string[], key: string): void {
  if (!fields.includes(key)) throw new Error('Select a unique key field.');
  const selected = names.filter(Boolean);
- if (selected.some(n => /[\r\n]/.test(n) || n === 'bases_data_studio_key')) throw new Error('Property names must be single-line and cannot use the reserved key name.');
- if (new Set(selected).size !== selected.length) throw new Error('Property names must be unique.');
+ if (selected.some(n => /[\r\n]/.test(n) || ['bases_data_studio_key', 'bases_data_studio_source'].includes(n.toLowerCase()))) throw new Error('Property names must be single-line and cannot use reserved names.');
+ if (new Set(selected.map(name => name.toLowerCase())).size !== selected.length) throw new Error('Property names must be unique.');
 }
 export function stableKey(value: unknown): string {
  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') throw new Error('Keys must be nonempty strings, numbers or booleans.');
- const s = String(value).trim(); if (!s) throw new Error('Keys cannot be empty.'); return s;
+ const s = String(value); if (!s.trim()) throw new Error('Keys cannot be empty.'); return s;
 }
 export async function keyPath(key: string): Promise<string> {
  const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
  return Array.from(new Uint8Array(bytes), x => x.toString(16).padStart(2,'0')).join('') + '.md';
 }
 // JSON scalar and collection syntax is also valid YAML; quoting avoids YAML injection.
-export function renderNote(key: string, row: Row, fields: string[], names: string[]): string {
+export function renderNote(key: string, row: Row, fields: string[], names: string[], source?: string): string {
  const lines = [`${JSON.stringify('bases_data_studio_key')}: ${JSON.stringify(key)}`];
+ if (source !== undefined) lines.push(`${JSON.stringify('bases_data_studio_source')}: ${JSON.stringify(source)}`);
  fields.forEach((field,i) => { const name = names[i]; if (name) lines.push(`${JSON.stringify(name)}: ${JSON.stringify(row[field] === undefined ? '' : row[field])}`); });
  return `---\n${lines.join('\n')}\n---\n`;
+}
+
+// 0.1.0 converted CSV cells before selecting a key, and trimmed every key.
+// Multiple original values can map to the same old key; callers must treat
+// matching legacy records as conflicts instead of silently claiming a match.
+export function legacyKeys(key: string, isCsv: boolean): string[] {
+ const oldValue = isCsv ? infer(key) : key;
+ return Array.from(new Set([key.trim(), String(oldValue).trim()].filter(Boolean)));
 }
