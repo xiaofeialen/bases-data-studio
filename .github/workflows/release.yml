@@ -44,6 +44,7 @@ jobs:
               run: |
                   tag="${GITHUB_REF#refs/tags/}"
 
+                  gh release view "$tag" >/dev/null 2>&1 && exit 0
                   gh release create "$tag" \
                     --title="$tag" \
                     --draft \

@@ -1,7 +1,7 @@
 import { App, Modal, Notice, normalizePath } from 'obsidian';
 import { infer, keyPath, parseInput, renderNote, Row, stableKey, validateMapping } from './import-core';
 
-type Item = {path:string; content:string; status:'create'|'skip'};
+type Item = {key:string; path:string; content:string; status:'create'|'skip'};
 export class ImportModal extends Modal {
  private rows: Row[] = [];
  private fields: string[] = [];
@@ -48,15 +48,15 @@ export class ImportModal extends Modal {
    for (const row of this.rows) {
     const key=stableKey(row[this.key]); if(seen.has(key)) throw new Error(`Duplicate key in input: ${key}`); seen.add(key);
     const path=normalizePath(`${this.folder}/${await keyPath(key)}`);
-    plan.push({path,content:renderNote(key,row,this.fields,this.names),status:this.app.vault.getAbstractFileByPath(path) ? 'skip':'create'});
+    plan.push({key,path,content:renderNote(key,row,this.fields,this.names),status:this.app.vault.getAbstractFileByPath(path) ? 'skip':'create'});
    }
    this.plan=plan; this.showPreview();
   } catch(e) {new Notice(`Preview failed: ${String(e)}`);}
  }
  private showPreview():void {
   const el=this.contentEl; el.empty(); el.createEl('h2',{text:'Preview import'});
-  el.createEl('p',{text:`New: ${this.plan.filter(x=>x.status==='create').length}; update: 0; skip: ${this.plan.filter(x=>x.status==='skip').length}. Existing notes are never overwritten.`});
-  const list=el.createEl('ul'); this.plan.forEach(x=>list.createEl('li',{text:`${x.status}: ${x.path}`}));
+  el.createEl('p',{text:`New: ${this.plan.filter(x=>x.status==='create').length}; update: 0; skip: ${this.plan.filter(x=>x.status==='skip').length}. Existing notes are never overwritten. The destination folder will also contain an import log and, if absent, a Bases view.`});
+  const list=el.createEl('ul'); this.plan.forEach(x=>{ const item=list.createEl('li'); const details=item.createEl('details'); details.createEl('summary',{text:`${x.status}: ${x.key} (${x.path})`}); details.createEl('pre',{text:x.content}); });
   const back=el.createEl('button',{text:'Back'}); back.onclick=()=>this.showMapping();
   const run=el.createEl('button',{text:'Import'}); run.onclick=()=>{void this.execute();};
  }
