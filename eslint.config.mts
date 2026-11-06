@@ -29,4 +29,5 @@ export default defineConfig(
 		},
 	},
 	...obsidianmd.configs.recommended,
+	{ files: ['tests/**/*.ts'], rules: { 'obsidianmd/no-nodejs-modules': 'off' } },
 );

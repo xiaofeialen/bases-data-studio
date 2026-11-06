@@ -1,11 +1,9 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
-	"version": "1.0.0",
-	"minAppVersion": "1.0.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
-	"isDesktopOnly": false
+  "id": "bases-data-studio",
+  "name": "Bases Data Studio",
+  "version": "0.1.0",
+  "minAppVersion": "1.9.0",
+  "description": "Import CSV and JSON records into notes and explore them with Bases.",
+  "author": "Bases Data Studio contributors",
+  "isDesktopOnly": false
 }

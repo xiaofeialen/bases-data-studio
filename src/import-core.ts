@@ -1,0 +1,43 @@
+import Papa from 'papaparse';
+
+export type Row = Record<string, unknown>;
+export function parseInput(text: string, name: string): Row[] {
+ let rows: unknown;
+ if (name.toLowerCase().endsWith('.csv')) {
+  const result = Papa.parse<Row>(text, {header:true, skipEmptyLines:'greedy'});
+  if (result.errors.length) throw new Error(result.errors.map(e => `Row ${e.row ?? '?'}: ${e.message}`).join('\n'));
+  rows = result.data;
+ } else if (name.toLowerCase().endsWith('.json')) rows = JSON.parse(text);
+ else throw new Error('Choose a CSV or JSON file.');
+ if (!Array.isArray(rows) || rows.some(r => !r || typeof r !== 'object' || Array.isArray(r))) throw new Error('Expected an array of objects.');
+ if (!rows.length) throw new Error('The file contains no records.');
+ return rows as Row[];
+}
+export function infer(value: unknown): unknown {
+ if (typeof value !== 'string') return value;
+ const s = value.trim();
+ if (s === '') return '';
+ if (/^(true|false)$/i.test(s)) return s.toLowerCase() === 'true';
+ if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(s) && Number.isFinite(Number(s))) return Number(s);
+ return value;
+}
+export function validateMapping(fields: string[], names: string[], key: string): void {
+ if (!fields.includes(key)) throw new Error('Select a unique key field.');
+ const selected = names.filter(Boolean);
+ if (selected.some(n => /[\r\n]/.test(n) || n === 'bases_data_studio_key')) throw new Error('Property names must be single-line and cannot use the reserved key name.');
+ if (new Set(selected).size !== selected.length) throw new Error('Property names must be unique.');
+}
+export function stableKey(value: unknown): string {
+ if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') throw new Error('Keys must be nonempty strings, numbers or booleans.');
+ const s = String(value).trim(); if (!s) throw new Error('Keys cannot be empty.'); return s;
+}
+export async function keyPath(key: string): Promise<string> {
+ const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
+ return Array.from(new Uint8Array(bytes), x => x.toString(16).padStart(2,'0')).join('') + '.md';
+}
+// JSON scalar and collection syntax is also valid YAML; quoting avoids YAML injection.
+export function renderNote(key: string, row: Row, fields: string[], names: string[]): string {
+ const lines = [`${JSON.stringify('bases_data_studio_key')}: ${JSON.stringify(key)}`];
+ fields.forEach((field,i) => { const name = names[i]; if (name) lines.push(`${JSON.stringify(name)}: ${JSON.stringify(infer(row[field] ?? ''))}`); });
+ return `---\n${lines.join('\n')}\n---\n`;
+}
