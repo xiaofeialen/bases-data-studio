@@ -1,9 +1,12 @@
 import { App, Modal, Notice, normalizePath, getFrontMatterInfo, parseYaml } from 'obsidian';
 import { infer, keyPath, legacyKeys, parseInput, renderNote, Row, stableKey, validateMapping } from './import-core';
 
-type Status = 'create'|'skip'|'conflict';
-type Item = {key:string; path:string; content:string; status:Status; aliases:string[]; reason?:string};
-type Existing = {key:string; source?:string; path:string};
+type Status = 'create'|'skip'|'conflict'|'update';
+type Change = {name:string; before:unknown; exists:boolean; after:unknown; selected:boolean};
+type Item = {key:string; path:string; content:string; status:Status; aliases:string[]; reason?:string; changes?:Change[]};
+type Existing = {key:string; source?:string; path:string; props:Record<string,unknown>};
+export type ImportProfile = {folder:string; key:string; names:Record<string,string>};
+const equal = (a:unknown,b:unknown):boolean => JSON.stringify(a) === JSON.stringify(b);
 export class ImportModal extends Modal {
  private rows: Row[] = [];
  private rawRows: Row[] = [];
@@ -14,11 +17,11 @@ export class ImportModal extends Modal {
  private folder = 'Imported data';
  private plan: Item[] = [];
  private busy = false;
- constructor(app: App) { super(app); }
+ constructor(app: App, private profile?:ImportProfile, private saveProfile?:(profile:ImportProfile)=>Promise<void>) { super(app); }
  onOpen(): void { this.showSetup(); }
  private showSetup(): void {
   const el = this.contentEl; el.empty(); el.createEl('h2',{text:'Import CSV or JSON'});
-  el.createEl('p',{text:'Choose a local file. Existing notes are skipped to protect your edits.'});
+  el.createEl('p',{text:'Choose a local file. Existing notes are changed only when you select fields in the preview.'});
   const input = el.createEl('input',{type:'file'}); input.accept = '.csv,.json';
   input.onchange = () => { void (async () => { try {
    const file = input.files?.[0]; if (!file) return;
@@ -26,12 +29,16 @@ export class ImportModal extends Modal {
    this.rawRows = parseInput(await file.text(), file.name, {inferCsv:false});
    this.rows = this.isCsv ? this.rawRows.map(row => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, infer(value)]))) : this.rawRows;
    this.fields = Array.from(new Set(this.rows.flatMap(r => Object.keys(r))));
-   this.names = [...this.fields]; this.key = this.fields[0] ?? ''; this.showMapping();
+   this.names = this.fields.map(field=>this.profile && Object.prototype.hasOwnProperty.call(this.profile.names,field) ? this.profile.names[field] ?? field : field);
+   this.key = this.profile && this.fields.includes(this.profile.key) ? this.profile.key : this.fields[0] ?? '';
+   if(this.profile) this.folder=this.profile.folder;
+   this.showMapping();
   } catch (e) { new Notice(`Cannot read file: ${String(e)}`); } })(); };
  }
  private showMapping(): void {
   const el = this.contentEl; el.empty(); el.createEl('h2',{text:'Map fields'});
   el.createEl('p',{text:'Leave a property name blank to omit it. The unique key identifies records across imports.'});
+  if(this.profile) el.createEl('p',{text:'The last used folder, key and matching field mappings have been restored. Review them for this dataset.'});
   const folder = el.createEl('input',{type:'text',value:this.folder}); folder.setAttribute('aria-label','Destination folder');
   folder.oninput = () => { this.folder = folder.value; };
   const select = el.createEl('select'); select.setAttribute('aria-label','Unique key field');
@@ -65,6 +72,24 @@ export class ImportModal extends Modal {
     const result=this.classify(existing,key,path,aliases);
     plan.push({key,path,aliases,content:renderNote(key,noteRow,this.fields,this.names,this.folder),...result});
    }
+   for(const item of plan) {
+    if(item.status!=='skip') continue;
+    const match=existing.find(x=>x.source===this.folder && x.key===item.key);
+    if(!match) continue;
+    const rowIndex=this.rows.findIndex((row,i)=>stableKey(this.isCsv ? this.rawRows[i]?.[this.key] : row[this.key])===item.key);
+    const row=this.rows[rowIndex]; if(!row) continue;
+    const changes:Change[]=[];
+    for(const [i, field] of this.fields.entries()) {
+     const name=this.names[i]; if(!name) continue;
+     const collisions=Object.keys(match.props).filter(k=>k.toLowerCase()===name.toLowerCase());
+     if(collisions.some(k=>k!==name)) {item.status='conflict'; item.reason=`Property name differs only by case: ${name}.`; break;}
+     const exists=Object.prototype.hasOwnProperty.call(match.props,name);
+     const after=this.isCsv && field===this.key ? this.rawRows[rowIndex]?.[field] : row[field];
+     const value=after === undefined ? '' : after;
+     if(!exists || !equal(match.props[name],value)) changes.push({name,before:match.props[name],exists,after:value,selected:false});
+    }
+    if(item.status==='skip' && changes.length) {item.status='update'; item.path=match.path; item.changes=changes; item.reason='Select fields to update; unselected fields are preserved.';}
+   }
    this.plan=plan; this.showPreview();
   } catch(e) {new Notice(`Preview failed: ${String(e)}`);}
  }
@@ -86,7 +111,7 @@ export class ImportModal extends Modal {
    if(typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') throw new Error(`Invalid import key in ${file.path}.`);
    const source=props.bases_data_studio_source;
    if(source !== undefined && typeof source !== 'string') throw new Error(`Invalid import source in ${file.path}.`);
-   records.push({key:String(value),source,path:file.path});
+   records.push({key:String(value),source,path:file.path,props});
   }
   return records;
  }
@@ -101,13 +126,13 @@ export class ImportModal extends Modal {
  }
  private showPreview():void {
   const el=this.contentEl; el.empty(); el.createEl('h2',{text:'Preview import'});
-  el.createEl('p',{text:`New: ${this.plan.filter(x=>x.status==='create').length}; update: 0; skip: ${this.plan.filter(x=>x.status==='skip').length}; conflict: ${this.plan.filter(x=>x.status==='conflict').length}. Conflicts are skipped and need manual review. Existing notes are never overwritten. The destination folder will also contain an import log and, if absent, a Bases view at ${this.folder}/Imported records.base.`});
-  const list=el.createEl('ul'); this.plan.forEach(x=>{ const item=list.createEl('li'); const details=item.createEl('details'); details.createEl('summary',{text:`${x.status}: ${x.key} (${x.path})${x.reason ? ` — ${x.reason}` : ''}`}); details.createEl('pre',{text:x.content}); });
+  el.createEl('p',{text:`New: ${this.plan.filter(x=>x.status==='create').length}; update: ${this.plan.filter(x=>x.status==='update').length}; skip: ${this.plan.filter(x=>x.status==='skip').length}; conflict: ${this.plan.filter(x=>x.status==='conflict').length}. Select each field to update. Conflicts are skipped. The destination folder will also contain an import log and, if absent, a Bases view at ${this.folder}/Imported records.base.`});
+  const list=el.createEl('ul'); this.plan.forEach(x=>{ const item=list.createEl('li'); const details=item.createEl('details'); details.createEl('summary',{text:`${x.status}: ${x.key} (${x.path})${x.reason ? ` — ${x.reason}` : ''}`}); if(x.changes) x.changes.forEach(change=>{const line=details.createEl('label'); const input=line.createEl('input',{type:'checkbox'}); input.onchange=()=>{change.selected=input.checked;}; line.createSpan({text:` ${change.name}: ${change.exists ? JSON.stringify(change.before) : '(missing)'} → ${JSON.stringify(change.after)}`});}); else details.createEl('pre',{text:x.content}); });
   const back=el.createEl('button',{text:'Back'}); back.onclick=()=>this.showMapping();
   const run=el.createEl('button',{text:'Import'}); run.onclick=()=>{void this.execute();};
  }
  private async execute():Promise<void> {
-  if(this.busy) return; this.busy=true; let created=0, skipped=0; const errors:string[]=[];
+  if(this.busy) return; this.busy=true; let created=0, updated=0, skipped=0; const errors:string[]=[];
   try {
    const existing=await this.indexNotes();
    if(this.plan.some(item=>item.status==='create' && this.classify(existing,item.key,item.path,item.aliases).status!=='create')) {
@@ -115,6 +140,26 @@ export class ImportModal extends Modal {
    }
    let current=''; for(const part of this.folder.split('/')) {current=current ? `${current}/${part}` : part; if(!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);}
    for(const item of this.plan) {
+    if(item.status==='update') {
+     const selected=item.changes?.filter(change=>change.selected) ?? [];
+     if(!selected.length) {skipped++; continue;}
+     const exact=existing.filter(x=>x.source===this.folder && x.key===item.key);
+     const legacy=existing.filter(x=>x.source===undefined && item.aliases.includes(x.key));
+     if(exact.length!==1 || exact[0]?.path!==item.path || legacy.length) {errors.push(`${item.path}: identity changed after preview.`); continue;}
+     const file=this.app.vault.getFileByPath(item.path);
+     if(!file || file.extension!=='md') {errors.push(`${item.path}: note is missing.`); continue;}
+     try {
+      await this.app.fileManager.processFrontMatter(file, frontmatter=>{
+       const props=frontmatter as Record<string,unknown>;
+       if(String(props.bases_data_studio_key)!==item.key || props.bases_data_studio_source!==this.folder) throw new Error('Identity changed after preview.');
+       for(const change of selected) {
+        if(Object.keys(props).some(k=>k!==change.name && k.toLowerCase()===change.name.toLowerCase()) || Object.prototype.hasOwnProperty.call(props,change.name)!==change.exists || !equal(props[change.name],change.before)) throw new Error(`Property changed after preview: ${change.name}.`);
+       }
+       for(const change of selected) props[change.name]=change.after;
+      }); updated++;
+     } catch(e) {errors.push(`${item.path}: ${String(e)}`);}
+     continue;
+    }
     if(item.status!=='create' || this.app.vault.getAbstractFileByPath(item.path)) {skipped++; continue;}
     try {await this.app.vault.create(item.path,item.content); created++;} catch(e) {errors.push(`${item.path}: ${String(e)}`);}
    }
@@ -128,8 +173,9 @@ export class ImportModal extends Modal {
    const logPath=normalizePath(`${this.folder}/import-log-${Date.now()}-${crypto.randomUUID()}.md`);
    const conflicts=this.plan.filter(item=>item.status==='conflict');
    const entries=[...errors,...conflicts.map(item=>`Conflict for ${JSON.stringify(item.key)}: ${item.reason ?? 'manual review required'}`)];
-   await this.app.vault.create(logPath,`# Import log\n\nCreated: ${created}\nSkipped: ${skipped}\nErrors: ${errors.length}\nConflicts: ${conflicts.length}\n\n${entries.map(e=>`- ${e.replace(/[\r\n]/g,' ')}`).join('\n')}\n`);
-   new Notice(`Import finished: ${created} created, ${skipped} skipped, ${errors.length} errors${conflicts.length ? `, ${conflicts.length} conflicts to review` : ''}.`); this.close();
+   await this.app.vault.create(logPath,`# Import log\n\nCreated: ${created}\nSkipped: ${skipped}\nErrors: ${errors.length}\nUpdated: ${updated}\nConflicts: ${conflicts.length}\n\n${entries.map(e=>`- ${e.replace(/[\r\n]/g,' ')}`).join('\n')}\n`);
+   if(this.saveProfile) await this.saveProfile({folder:this.folder,key:this.key,names:Object.fromEntries(this.fields.map((field,i)=>[field,this.names[i] ?? '']))});
+   new Notice(`Import finished: ${created} created, ${skipped} skipped, ${errors.length} errors, ${updated} updated${conflicts.length ? `, ${conflicts.length} conflicts to review` : ''}.`); this.close();
   } catch(e) {new Notice(`Import stopped after ${created} creations: ${String(e)}. Retry to skip existing notes.`, 12000);} finally {this.busy=false;}
  }
  onClose():void {this.contentEl.empty();}

@@ -44,7 +44,10 @@ jobs:
               run: |
                   tag="${GITHUB_REF#refs/tags/}"
 
-                  gh release view "$tag" >/dev/null 2>&1 && exit 0
+                  if gh release view "$tag" >/dev/null 2>&1; then
+                    gh release upload "$tag" main.js manifest.json ${{ steps.styles.outputs.exists == 'true' && 'styles.css' || '' }}
+                    exit 0
+                  fi
                   gh release create "$tag" \
                     --title="$tag" \
                     --draft \

@@ -6,7 +6,9 @@ This is a development preview. Requires Obsidian 1.15.0 or later. Test in a back
 
 ## Import data
 
-Run **Bases Data Studio: Import CSV or JSON**, choose a CSV with headers or a JSON array of objects, select a destination folder and a stable unique key, map fields to properties, then review the preview before importing. The preview shows new records, skipped records and conflicts. Existing notes are not overwritten; updates must currently be made by hand.
+Run **Bases Data Studio: Import CSV or JSON**, choose a CSV with headers or a JSON array of objects, select a destination folder and a stable unique key, map fields to properties, then review the preview before importing. The preview shows new records, possible updates, skipped records and conflicts. Expand an update to see old and new values, then check only the properties you want to change. No existing property is updated unless selected. The note body and unselected properties are preserved. If a selected property or record identity changes after preview, that note is not updated; preview again.
+
+After an import, the last folder, key field and field mappings are saved locally and restored for matching fields next time. Review them before each import, especially when switching datasets. Source data and field values are not stored in these settings. Updates are not an automatic synchronization and there is no built-in undo; back up your vault before updating important notes. The log records counts and errors, not the old values.
 
 Use a separate destination folder for each dataset and keep using the same folder and key field when reimporting. Each imported note records its key and source folder in `bases_data_studio_key` and `bases_data_studio_source`; leave these properties intact so the plugin can recognize a note even if it is moved or renamed. It scans Markdown notes in the vault when preparing and confirming an import. Changing the original source folder for a dataset changes its identity. Duplicate or empty input keys stop the preview; occupied paths and ambiguous existing records are reported as conflicts and skipped.
 
@@ -24,7 +26,7 @@ Based on the [official Obsidian sample plugin](https://github.com/obsidianmd/obs
 
 ## Roadmap
 
-Future work includes safe updates, conflict resolution, synchronization, and reporting.
+Future work includes richer conflict resolution, reversible updates, synchronization, and reporting.
 
 ## Release
 
