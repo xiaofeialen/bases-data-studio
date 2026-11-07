@@ -11,6 +11,7 @@ type NodeElement = { tag: string; text: string; children: NodeElement[] };
 type ModalInstance = {
  rows: Record<string, unknown>[]; fields: string[]; names: string[]; key: string; folder: string;
  rawRows: Record<string, unknown>[]; isCsv: boolean;
+ plan: {status:string; changes?:{name:string; selected:boolean}[]}[];
  contentEl: NodeElement; closed: boolean;
  preview(): Promise<void>; execute(): Promise<void>;
 };
@@ -29,14 +30,18 @@ class FakeVault {
  folders = new Set<string>();
  failPath = '';
  failReadPath = '';
- getAbstractFileByPath(path: string): object | null {return this.files.has(path) || this.folders.has(path) ? {path} : null;}
+ getAbstractFileByPath(path: string): object | null {return this.files.has(path) ? {path,extension:path.endsWith('.md')?'md':''} : this.folders.has(path) ? {path} : null;}
+ getFileByPath(path: string): object | null {return this.files.has(path) ? {path,extension:path.endsWith('.md')?'md':''} : null;}
  getMarkdownFiles(): {path:string}[] {return [...this.files.keys()].filter(path=>path.endsWith('.md')).map(path=>({path}));}
  async cachedRead(file: {path:string}): Promise<string> {if(file.path===this.failReadPath) throw Error('injected read failure'); const text=this.files.get(file.path); if(text===undefined) throw Error('missing file'); return text;}
  async createFolder(path: string): Promise<void> {if(this.getAbstractFileByPath(path)) throw Error('already exists'); this.folders.add(path);}
  async create(path: string, content: string): Promise<void> {if(path === this.failPath) throw Error('injected write failure'); if(this.getAbstractFileByPath(path)) throw Error('already exists'); this.files.set(path,content);}
 }
 function modal(vault: FakeVault, rows: Record<string,unknown>[]): ModalInstance {
- const instance = new ImportModal({vault});
+ const instance = new ImportModal({vault,fileManager:{processFrontMatter: async (file:{path:string},cb:(props:Record<string,unknown>)=>void)=>{
+  const {parse,stringify} = await import('yaml'); const text=vault.files.get(file.path)!; const match=/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text); if(!match) throw Error('missing frontmatter');
+  const props=parse(match[1]!) as Record<string,unknown>; cb(props); vault.files.set(file.path,`---\n${stringify(props)}---\n${text.slice(match[0].length)}`);
+ }}});
  instance.rows=rows; instance.fields=['id','name']; instance.names=['id','name']; instance.key='id'; instance.folder='Imported data';
  return instance;
 }
@@ -57,7 +62,7 @@ void test('preview is read-only and import creates notes, a view and a log; reim
  assert.ok([...vault.files].some(([path,text])=>path.includes('import-log-') && text.includes('Created: 2')));
  const edited = vault.files.get(pathA)! + '\nUser edit\n'; vault.files.set(pathA,edited);
  const retry=modal(vault,[{id:'a',name:'changed'},{id:'b',name:'changed'}]); await retry.preview();
- assert.match(allText(retry.contentEl),/New: 0; update: 0; skip: 2/);
+ assert.match(allText(retry.contentEl),/New: 0; update: 2; skip: 0/);
  // Simulate a later retry while keeping the first log intact.
  const originalNow=Date.now; Date.now=()=>originalNow()+1000;
  try {await retry.execute();} finally {Date.now=originalNow;}
@@ -111,7 +116,7 @@ void test('a moved or renamed imported note is found and preserved on reimport',
  const original=`Imported data/${await keyPath('a')}`; const edited=vault.files.get(original)!+'\nHand edited';
  vault.files.delete(original); vault.files.set('Other folder/Renamed.md',edited);
  const retry=modal(vault,[{id:'a',name:'changed'}]); await retry.preview();
- assert.match(allText(retry.contentEl),/skip:\s*1/i);
+ assert.match(allText(retry.contentEl),/update:\s*1/i);
  await retry.execute();
  assert.equal(vault.files.has(original),false); assert.equal(vault.files.get('Other folder/Renamed.md'),edited);
 });
@@ -163,4 +168,29 @@ void test('an unreadable note aborts preview rather than silently allowing a dup
  const instance=modal(vault,[{id:'a',name:'new'}]); await instance.preview();
  assert.ok(notices.some(message=>message.includes('Preview failed') && message.includes('injected read failure')));
  assert.equal(vault.files.size,1); assert.equal(vault.folders.size,0);
+});
+
+void test('selected fields update while unselected properties and note body remain unchanged',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'Alice'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; vault.files.set(path,vault.files.get(path)!+'User body\n');
+ const retry=modal(vault,[{id:'a',name:'Bob'}]); await retry.preview();
+ assert.match(allText(retry.contentEl),/Alice.*Bob/);
+ retry.plan[0]!.changes!.find(c=>c.name==='name')!.selected=true;
+ await retry.execute(); assert.match(vault.files.get(path)!,/name: Bob/); assert.match(vault.files.get(path)!,/User body/); assert.match(vault.files.get(path)!,/id: a/);
+});
+
+void test('updates stop if a selected property changed after preview',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'Alice'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; const retry=modal(vault,[{id:'a',name:'Bob'}]); await retry.preview();
+ retry.plan[0]!.changes!.find(c=>c.name==='name')!.selected=true;
+ const edited=vault.files.get(path)!.replace('"Alice"','"Carol"'); vault.files.set(path,edited);
+ await retry.execute(); assert.equal(vault.files.get(path),edited); assert.ok(notices.some(message=>message.includes('1 errors')));
+});
+
+void test('an update refuses a changed identity and never partially applies selected fields',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'Alice'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; const retry=modal(vault,[{id:'a',name:'Bob'}]); await retry.preview();
+ retry.plan[0]!.changes!.find(c=>c.name==='name')!.selected=true;
+ const edited=vault.files.get(path)!.replace('"bases_data_studio_source": "Imported data"','"bases_data_studio_source": "Other data"'); vault.files.set(path,edited);
+ await retry.execute(); assert.equal(vault.files.get(path),edited);
 });

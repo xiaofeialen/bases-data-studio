@@ -1,6 +1,6 @@
 {
   "name": "bases-data-studio",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Import CSV and JSON into Obsidian Bases",
   "main": "main.js",
   "type": "module",
