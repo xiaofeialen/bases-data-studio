@@ -1,4 +1,5 @@
 import { App, Modal, Notice, normalizePath, getFrontMatterInfo, parseYaml } from 'obsidian';
+import { confirmEntry, fingerprint, finishBatch, recordEntry, startBatch } from './journal';
 import { infer, keyPath, legacyKeys, parseInput, renderNote, Row, stableKey, validateMapping } from './import-core';
 
 type Status = 'create'|'skip'|'conflict'|'update';
@@ -98,7 +99,7 @@ export class ImportModal extends Modal {
  private async indexNotes():Promise<Existing[]> {
   const records:Existing[]=[];
   for(const file of this.app.vault.getMarkdownFiles()) {
-   const content=await this.app.vault.cachedRead(file);
+   const content=await this.app.vault.read(file);
    if (!content.includes('bases_data_studio_key')) continue;
    const info=getFrontMatterInfo(content); if(!info.exists) continue;
    if(!/(?:^|\n)\s*(?:"bases_data_studio_key"|'bases_data_studio_key'|bases_data_studio_key)\s*:/.test(info.frontmatter)) continue;
@@ -139,6 +140,7 @@ export class ImportModal extends Modal {
     throw new Error('Vault contents changed after preview. Preview the import again.');
    }
    let current=''; for(const part of this.folder.split('/')) {current=current ? `${current}/${part}` : part; if(!this.app.vault.getAbstractFileByPath(current)) await this.app.vault.createFolder(current);}
+   const batch=await startBatch(this.app,this.folder);
    for(const item of this.plan) {
     if(item.status==='update') {
      const selected=item.changes?.filter(change=>change.selected) ?? [];
@@ -149,6 +151,9 @@ export class ImportModal extends Modal {
      const file=this.app.vault.getFileByPath(item.path);
      if(!file || file.extension!=='md') {errors.push(`${item.path}: note is missing.`); continue;}
      try {
+      const content=await this.app.vault.read(file);
+      const id=crypto.randomUUID();
+      await recordEntry(this.app,{version:1,batch,id,kind:'update',source:this.folder,key:item.key,path:item.path,metadata:{ctime:file.stat.ctime,mtime:file.stat.mtime,size:file.stat.size},fingerprint:await fingerprint(content),changes:selected.map(c=>({name:c.name,exists:c.exists,...(c.exists ? {before:c.before} : {}),after:c.after}))});
       await this.app.fileManager.processFrontMatter(file, frontmatter=>{
        const props=frontmatter as Record<string,unknown>;
        if(String(props.bases_data_studio_key)!==item.key || props.bases_data_studio_source!==this.folder) throw new Error('Identity changed after preview.');
@@ -156,13 +161,19 @@ export class ImportModal extends Modal {
         if(Object.keys(props).some(k=>k!==change.name && k.toLowerCase()===change.name.toLowerCase()) || Object.prototype.hasOwnProperty.call(props,change.name)!==change.exists || !equal(props[change.name],change.before)) throw new Error(`Property changed after preview: ${change.name}.`);
        }
        for(const change of selected) props[change.name]=change.after;
-      }); updated++;
+      }); await confirmEntry(this.app,batch,id); updated++;
      } catch(e) {errors.push(`${item.path}: ${String(e)}`);}
      continue;
     }
     if(item.status!=='create' || this.app.vault.getAbstractFileByPath(item.path)) {skipped++; continue;}
-    try {await this.app.vault.create(item.path,item.content); created++;} catch(e) {errors.push(`${item.path}: ${String(e)}`);}
+    try {
+     const content=item.content.replace('---\n',`---\n"bases_data_studio_batch": ${JSON.stringify(batch)}\n`);
+     const id=crypto.randomUUID();
+     await recordEntry(this.app,{version:1,batch,id,kind:'create',source:this.folder,key:item.key,path:item.path,fingerprint:await fingerprint(content),changes:[],content});
+     await this.app.vault.create(item.path,content); await confirmEntry(this.app,batch,id); created++;
+    } catch(e) {errors.push(`${item.path}: ${String(e)}`);}
    }
+   await finishBatch(this.app,batch);
    const basePath=normalizePath(`${this.folder}/Imported records.base`);
    if(!this.app.vault.getAbstractFileByPath(basePath)) {
     // Source is recorded at import time, so moving a note does not remove it

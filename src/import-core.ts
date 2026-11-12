@@ -66,7 +66,7 @@ export function infer(value: unknown): unknown {
 export function validateMapping(fields: string[], names: string[], key: string): void {
  if (!fields.includes(key)) throw new Error('Select a unique key field.');
  const selected = names.filter(Boolean);
- if (selected.some(n => /[\r\n]/.test(n) || ['bases_data_studio_key', 'bases_data_studio_source','__proto__','prototype','constructor'].includes(n.toLowerCase()))) throw new Error('Property names must be single-line and cannot use reserved names.');
+ if (selected.some(n => /[\r\n]/.test(n) || ['bases_data_studio_key', 'bases_data_studio_source','bases_data_studio_batch','__proto__','prototype','constructor'].includes(n.toLowerCase()))) throw new Error('Property names must be single-line and cannot use reserved names.');
  if (new Set(selected.map(name => name.toLowerCase())).size !== selected.length) throw new Error('Property names must be unique.');
 }
 export function stableKey(value: unknown): string {

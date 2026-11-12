@@ -31,3 +31,44 @@ Future work includes richer conflict resolution, reversible updates, synchroniza
 ## Release
 
 Create a GitHub release with a tag matching the manifest version and attach `main.js`, `manifest.json`, and `styles.css`. Submit the repository through the [Obsidian Community Directory](https://community.obsidian.md) after reviewing its requirements.
+
+### Import journals and rollback
+
+Each import writes a journal under the vault's configuration directory at
+`plugins/bases-data-studio/journals/`. The journal contains file paths, import
+keys, original selected property values, and the full contents of newly created
+notes. It remains on disk until removed manually, including after rollback; it is
+local data and is not transmitted by this plugin. Protect it like the vault
+itself, and include it in backups when recovery is required.
+
+The **Inspect and roll back import batches** command lists complete and
+incomplete batches. Review the preview before applying it. A property is
+restored only when its current value still equals the imported value; conflicts
+are reported. A rollback attempt is recorded before a change, so an interrupted
+or failed attempt requires manual inspection rather than an automatic retry.
+Operations without a completion record are also left for manual review. Do not
+edit journal files. Missing or malformed journals cannot be used for recovery.
+
+Unchanged created notes with an unambiguous batch marker are moved to the
+vault trash after a fresh content check. Obsidian does not expose an atomic
+compare-and-delete operation: a concurrent edit between the check and trash
+operation can be moved to trash too. Restore the note from the vault trash if
+that happens. Also, Obsidian's adapter does not expose a filesystem flush guarantee, so
+read-back verification cannot guarantee recovery from a sudden power loss.
+Keep independent backups. Close other Obsidian windows and sync clients while
+importing or rolling back; this implementation does not coordinate across
+processes or devices.
+
+To verify in a disposable vault, first make a separate backup. Build the plugin,
+copy `main.js`, `manifest.json`, and `styles.css` into the vault's plugin
+folder, then enable it. Import a CSV twice, check that no duplicate notes appear,
+select an update and import it, then edit one property and the note body. Run
+**Inspect and roll back import batches**, review the latest batch, and verify
+that edited properties and body remain untouched while unchanged selected
+properties revert. Repeat rollback; move a created note and inspect its batch;
+check that the unchanged note moves to the vault trash. Repeat using JSON, a missing
+note, and a legacy note. Restore the backup after testing. Manual verification on Obsidian 1.15.1 with a separate backup covered repeated CSV preview, JSON update and property rollback, a moved unchanged note, and preservation of an edited note, body, and unrelated property.
+
+### 0.4.0 release notes
+
+Adds import batch journals, batch inspection, conflict-aware rollback and regression tests. Incomplete operations require manual inspection. Created notes are moved to the vault trash only after identity and content checks.

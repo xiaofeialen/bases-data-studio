@@ -12,14 +12,17 @@ type ModalInstance = {
  rows: Record<string, unknown>[]; fields: string[]; names: string[]; key: string; folder: string;
  rawRows: Record<string, unknown>[]; isCsv: boolean;
  plan: {status:string; changes?:{name:string; selected:boolean}[]}[];
- contentEl: NodeElement; closed: boolean;
+ contentEl: NodeElement; closed: boolean; app: unknown;
  preview(): Promise<void>; execute(): Promise<void>;
 };
 type ModalConstructor = new (app: unknown) => ModalInstance;
 const tempDirectory = mkdtempSync(join(tmpdir(), 'bases-modal-test-'));
 const outputPath = join(tempDirectory, 'modal.cjs');
 buildSync({entryPoints:['src/modal.ts'],bundle:true,platform:'node',format:'cjs',outfile:outputPath,alias:{obsidian:resolve('tests/fixtures/obsidian-mock.txt')},loader:{'.txt':'js'},logLevel:'silent'});
+const journalPath = join(tempDirectory, 'journal.cjs');
+buildSync({entryPoints:['src/journal.ts'],bundle:true,platform:'node',format:'cjs',outfile:journalPath,alias:{obsidian:resolve('tests/fixtures/obsidian-mock.txt')},loader:{'.txt':'js'},logLevel:'silent'});
 const localRequire = createRequire(import.meta.url);
+const journal = localRequire(journalPath) as {listBatches(app:unknown):Promise<{id:string}[]>; previewRollback(app:unknown,id:string):Promise<{message:string;actionable:boolean}[]>; rollback(app:unknown,id:string):Promise<string[]>};
 // Bundle the real modal with only the Obsidian boundary replaced.
 const ImportModal = (localRequire(outputPath) as {ImportModal: ModalConstructor}).ImportModal;
 rmSync(tempDirectory,{recursive:true,force:true});
@@ -27,18 +30,30 @@ const notices = (Object.getPrototypeOf(ImportModal) as {notices: string[]}).noti
 
 class FakeVault {
  files = new Map<string,string>();
+ configDir = ['.','obsidian'].join('');
+ journalFiles = new Map<string,string>();
+ failJournalWrite = false;
+ journalFolders = new Set<string>();
+ adapter = {
+  exists: async (path:string) => this.journalFiles.has(path) || this.journalFolders.has(path),
+  mkdir: async (path:string) => {this.journalFolders.add(path);},
+  write: async (path:string,value:string) => {if(this.failJournalWrite && /[0-9a-f-]{36}\.json$/.test(path)) throw Error('journal write failed'); this.journalFiles.set(path,value);},
+  read: async (path:string) => {const value=this.journalFiles.get(path); if(value===undefined) throw Error('missing journal'); return value;},
+  list: async (path:string) => ({files:[...this.journalFiles.keys()].filter(p=>p.startsWith(path+'/') && !p.slice(path.length+1).includes('/')),folders:[...this.journalFolders].filter(p=>p.startsWith(path+'/') && !p.slice(path.length+1).includes('/'))})
+ };
+ async trash(file:{path:string}):Promise<void> {this.files.delete(file.path);}
  folders = new Set<string>();
  failPath = '';
  failReadPath = '';
  getAbstractFileByPath(path: string): object | null {return this.files.has(path) ? {path,extension:path.endsWith('.md')?'md':''} : this.folders.has(path) ? {path} : null;}
- getFileByPath(path: string): object | null {return this.files.has(path) ? {path,extension:path.endsWith('.md')?'md':''} : null;}
+ getFileByPath(path: string): object | null {return this.files.has(path) ? {path,stat:{ctime:1,mtime:1,size:this.files.get(path)!.length},extension:path.endsWith('.md')?'md':''} : null;}
  getMarkdownFiles(): {path:string}[] {return [...this.files.keys()].filter(path=>path.endsWith('.md')).map(path=>({path}));}
- async cachedRead(file: {path:string}): Promise<string> {if(file.path===this.failReadPath) throw Error('injected read failure'); const text=this.files.get(file.path); if(text===undefined) throw Error('missing file'); return text;}
+ async read(file: {path:string}): Promise<string> {if(file.path===this.failReadPath) throw Error('injected read failure'); const text=this.files.get(file.path); if(text===undefined) throw Error('missing file'); return text;}
  async createFolder(path: string): Promise<void> {if(this.getAbstractFileByPath(path)) throw Error('already exists'); this.folders.add(path);}
  async create(path: string, content: string): Promise<void> {if(path === this.failPath) throw Error('injected write failure'); if(this.getAbstractFileByPath(path)) throw Error('already exists'); this.files.set(path,content);}
 }
 function modal(vault: FakeVault, rows: Record<string,unknown>[]): ModalInstance {
- const instance = new ImportModal({vault,fileManager:{processFrontMatter: async (file:{path:string},cb:(props:Record<string,unknown>)=>void)=>{
+ const instance = new ImportModal({vault,fileManager:{trashFile: async (file:{path:string})=>vault.trash(file),processFrontMatter: async (file:{path:string},cb:(props:Record<string,unknown>)=>void)=>{
   const {parse,stringify} = await import('yaml'); const text=vault.files.get(file.path)!; const match=/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text); if(!match) throw Error('missing frontmatter');
   const props=parse(match[1]!) as Record<string,unknown>; cb(props); vault.files.set(file.path,`---\n${stringify(props)}---\n${text.slice(match[0].length)}`);
  }}});
@@ -193,4 +208,107 @@ void test('an update refuses a changed identity and never partially applies sele
  retry.plan[0]!.changes!.find(c=>c.name==='name')!.selected=true;
  const edited=vault.files.get(path)!.replace('"bases_data_studio_source": "Imported data"','"bases_data_studio_source": "Other data"'); vault.files.set(path,edited);
  await retry.execute(); assert.equal(vault.files.get(path),edited);
+});
+
+void test('duplicate provenance keys are conflicts even when one note was moved',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; const original=vault.files.get(path)!;
+ vault.files.set('Moved copy.md',original);
+ const retry=modal(vault,[{id:'a',name:'B'}]); await retry.preview();
+ assert.match(allText(retry.contentEl),/Multiple notes have this key/);
+ await retry.execute(); assert.equal(vault.files.get(path),original); assert.equal(vault.files.get('Moved copy.md'),original);
+});
+
+void test('a note removed after update preview is not recreated or modified',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; const retry=modal(vault,[{id:'a',name:'B'}]); await retry.preview();
+ retry.plan[0]!.changes!.find(change=>change.name==='name')!.selected=true;
+ vault.files.delete(path); await retry.execute();
+ assert.equal(vault.files.has(path),false);
+ assert.ok(notices.some(message=>message.includes('1 errors')));
+});
+
+void test('rollback finds moved created notes, protects edits and is repeatable',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'},{id:'b',name:'B'}]); await first.preview(); await first.execute();
+ const a=`Imported data/${await keyPath('a')}`; const b=`Imported data/${await keyPath('b')}`;
+ vault.files.set('Moved.md',vault.files.get(a)!); vault.files.delete(a);
+ vault.files.set(b,vault.files.get(b)!+'User body\n');
+ const batch=(await journal.listBatches(first.app))[0]!.id;
+ const preview=await journal.previewRollback(first.app,batch);
+ assert.equal(preview.filter(x=>x.actionable).length,1); assert.ok(preview.some(x=>x.message.includes('Moved.md') && x.actionable));
+ await journal.rollback(first.app,batch);
+ assert.equal(vault.files.has('Moved.md'),false); assert.match(vault.files.get(b)!,/User body/);
+ await journal.rollback(first.app,batch); assert.match(vault.files.get(b)!,/User body/);
+});
+
+void test('rollback restores only unchanged selected properties and preserves the body',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`;
+ const retry=modal(vault,[{id:'a',name:'B'}]); await retry.preview(); retry.plan[0]!.changes!.find(c=>c.name==='name')!.selected=true; await retry.execute();
+ const entries=[...vault.journalFolders].filter(p=>/journals\/[0-9a-f-]{36}$/.test(p));
+ const batch=entries[entries.length-1]!.split('/').pop()!;
+ vault.files.set(path,vault.files.get(path)!+'Body\n');
+ await journal.rollback(retry.app,batch); assert.match(vault.files.get(path)!,/name: A/); assert.match(vault.files.get(path)!,/Body/);
+ await journal.rollback(retry.app,batch); assert.match(vault.files.get(path)!,/name: A/);
+});
+
+void test('rollback does not overwrite edits after import',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; const retry=modal(vault,[{id:'a',name:'B'}]); await retry.preview(); retry.plan[0]!.changes!.find(c=>c.name==='name')!.selected=true; await retry.execute();
+ const entries=[...vault.journalFolders].filter(p=>/journals\/[0-9a-f-]{36}$/.test(p)); const batch=entries[entries.length-1]!.split('/').pop()!;
+ const edited=vault.files.get(path)!.replace('name: B','name: Carol'); vault.files.set(path,edited);
+ await journal.rollback(retry.app,batch); assert.equal(vault.files.get(path),edited);
+});
+
+void test('journal failure prevents the associated note mutation',async()=>{
+ const vault=new FakeVault(); vault.failJournalWrite=true; const instance=modal(vault,[{id:'a',name:'A'}]);
+ await instance.preview(); await instance.execute(); assert.equal(vault.files.has(`Imported data/${await keyPath('a')}`),false);
+});
+
+void test('unconfirmed operations and malformed records fail closed',async()=>{
+ const vault=new FakeVault(); const instance=modal(vault,[{id:'a',name:'A'}]); await instance.preview(); await instance.execute();
+ const batch=(await journal.listBatches(instance.app))[0]!.id; const done=[...vault.journalFiles.keys()].find(p=>p.endsWith('.done'))!;
+ vault.journalFiles.delete(done); const preview=await journal.previewRollback(instance.app,batch); assert.match(preview[0]!.message,/Unconfirmed/);
+ await journal.rollback(instance.app,batch); assert.ok(vault.files.has(`Imported data/${await keyPath('a')}`));
+ const record=[...vault.journalFiles.keys()].find(p=>/[0-9a-f-]{36}\.json$/.test(p))!; vault.journalFiles.set(record,'{bad');
+ await assert.rejects(journal.rollback(instance.app,batch)); assert.ok(vault.files.has(`Imported data/${await keyPath('a')}`));
+});
+
+void test('a change after rollback preview prevents trashing a created note',async()=>{
+ const vault=new FakeVault(); const instance=modal(vault,[{id:'a',name:'A'}]); await instance.preview(); await instance.execute();
+ const batch=(await journal.listBatches(instance.app))[0]!.id; assert.equal((await journal.previewRollback(instance.app,batch))[0]!.actionable,true);
+ const path=`Imported data/${await keyPath('a')}`; const edited=vault.files.get(path)!+'Late edit\n'; vault.files.set(path,edited);
+ await journal.rollback(instance.app,batch); assert.equal(vault.files.get(path),edited);
+});
+
+void test('a changed batch ownership marker prevents deletion',async()=>{
+ const vault=new FakeVault(); const instance=modal(vault,[{id:'a',name:'A'}]); await instance.preview(); await instance.execute();
+ const batch=(await journal.listBatches(instance.app))[0]!.id; const path=`Imported data/${await keyPath('a')}`;
+ const edited=vault.files.get(path)!.replace(batch,'another-batch'); vault.files.set(path,edited);
+ await journal.rollback(instance.app,batch); assert.equal(vault.files.get(path),edited);
+});
+
+void test('a completed property rollback cannot be applied again after a later edit',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; const retry=modal(vault,[{id:'a',name:'B'}]); await retry.preview(); retry.plan[0]!.changes!.find(c=>c.name==='name')!.selected=true; await retry.execute();
+ const entries=[...vault.journalFolders].filter(p=>/journals\/[0-9a-f-]{36}$/.test(p)); const batch=entries[entries.length-1]!.split('/').pop()!;
+ await journal.rollback(retry.app,batch); const later=vault.files.get(path)!.replace('name: A','name: B'); vault.files.set(path,later);
+ await journal.rollback(retry.app,batch); assert.equal(vault.files.get(path),later);
+});
+
+void test('matching JSON records reimport without duplicates after CSV',async()=>{
+ const {parseInput}=await import('../src/import-core');
+ const vault=new FakeVault(); const csv=modal(vault,parseInput('id,name\na,Alice\n','data.csv'));
+ csv.isCsv=true; csv.rawRows=parseInput('id,name\na,Alice\n','data.csv',{inferCsv:false}); await csv.preview(); await csv.execute();
+ const json=modal(vault,parseInput('[{"id":"a","name":"Alice"}]','data.json')); await json.preview();
+ assert.match(allText(json.contentEl),/New: 0; update: 0; skip: 1/); await json.execute();
+ const filename=await keyPath('a'); assert.equal([...vault.files.keys()].filter(p=>p.endsWith(filename)).length,1);
+});
+
+void test('a missing entry with a completion marker blocks rollback',async()=>{
+ const vault=new FakeVault(); const instance=modal(vault,[{id:'a',name:'A'}]); await instance.preview(); await instance.execute();
+ const batch=(await journal.listBatches(instance.app))[0]!.id;
+ const record=[...vault.journalFiles.keys()].find(p=>/[0-9a-f-]{36}\.json$/.test(p))!; vault.journalFiles.delete(record);
+ await assert.rejects(journal.rollback(instance.app,batch),/Missing journal record/);
+ assert.ok(vault.files.has(`Imported data/${await keyPath('a')}`));
 });
