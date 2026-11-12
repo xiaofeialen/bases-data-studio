@@ -46,7 +46,7 @@ class FakeVault {
  failPath = '';
  failReadPath = '';
  getAbstractFileByPath(path: string): object | null {return this.files.has(path) ? {path,extension:path.endsWith('.md')?'md':''} : this.folders.has(path) ? {path} : null;}
- getFileByPath(path: string): object | null {return this.files.has(path) ? {path,extension:path.endsWith('.md')?'md':''} : null;}
+ getFileByPath(path: string): object | null {return this.files.has(path) ? {path,stat:{ctime:1,mtime:1,size:this.files.get(path)!.length},extension:path.endsWith('.md')?'md':''} : null;}
  getMarkdownFiles(): {path:string}[] {return [...this.files.keys()].filter(path=>path.endsWith('.md')).map(path=>({path}));}
  async read(file: {path:string}): Promise<string> {if(file.path===this.failReadPath) throw Error('injected read failure'); const text=this.files.get(file.path); if(text===undefined) throw Error('missing file'); return text;}
  async createFolder(path: string): Promise<void> {if(this.getAbstractFileByPath(path)) throw Error('already exists'); this.folders.add(path);}
@@ -228,16 +228,16 @@ void test('a note removed after update preview is not recreated or modified',asy
  assert.ok(notices.some(message=>message.includes('1 errors')));
 });
 
-void test('rollback reports moved created notes, protects edits and is repeatable',async()=>{
+void test('rollback finds moved created notes, protects edits and is repeatable',async()=>{
  const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'},{id:'b',name:'B'}]); await first.preview(); await first.execute();
  const a=`Imported data/${await keyPath('a')}`; const b=`Imported data/${await keyPath('b')}`;
  vault.files.set('Moved.md',vault.files.get(a)!); vault.files.delete(a);
  vault.files.set(b,vault.files.get(b)!+'User body\n');
  const batch=(await journal.listBatches(first.app))[0]!.id;
  const preview=await journal.previewRollback(first.app,batch);
- assert.equal(preview.filter(x=>x.actionable).length,0); assert.ok(preview.some(x=>x.message.includes('Moved.md') && x.message.includes('delete manually')));
+ assert.equal(preview.filter(x=>x.actionable).length,1); assert.ok(preview.some(x=>x.message.includes('Moved.md') && x.actionable));
  await journal.rollback(first.app,batch);
- assert.equal(vault.files.has('Moved.md'),true); assert.match(vault.files.get(b)!,/User body/);
+ assert.equal(vault.files.has('Moved.md'),false); assert.match(vault.files.get(b)!,/User body/);
  await journal.rollback(first.app,batch); assert.match(vault.files.get(b)!,/User body/);
 });
 
@@ -272,4 +272,43 @@ void test('unconfirmed operations and malformed records fail closed',async()=>{
  await journal.rollback(instance.app,batch); assert.ok(vault.files.has(`Imported data/${await keyPath('a')}`));
  const record=[...vault.journalFiles.keys()].find(p=>/[0-9a-f-]{36}\.json$/.test(p))!; vault.journalFiles.set(record,'{bad');
  await assert.rejects(journal.rollback(instance.app,batch)); assert.ok(vault.files.has(`Imported data/${await keyPath('a')}`));
+});
+
+void test('a change after rollback preview prevents trashing a created note',async()=>{
+ const vault=new FakeVault(); const instance=modal(vault,[{id:'a',name:'A'}]); await instance.preview(); await instance.execute();
+ const batch=(await journal.listBatches(instance.app))[0]!.id; assert.equal((await journal.previewRollback(instance.app,batch))[0]!.actionable,true);
+ const path=`Imported data/${await keyPath('a')}`; const edited=vault.files.get(path)!+'Late edit\n'; vault.files.set(path,edited);
+ await journal.rollback(instance.app,batch); assert.equal(vault.files.get(path),edited);
+});
+
+void test('a changed batch ownership marker prevents deletion',async()=>{
+ const vault=new FakeVault(); const instance=modal(vault,[{id:'a',name:'A'}]); await instance.preview(); await instance.execute();
+ const batch=(await journal.listBatches(instance.app))[0]!.id; const path=`Imported data/${await keyPath('a')}`;
+ const edited=vault.files.get(path)!.replace(batch,'another-batch'); vault.files.set(path,edited);
+ await journal.rollback(instance.app,batch); assert.equal(vault.files.get(path),edited);
+});
+
+void test('a completed property rollback cannot be applied again after a later edit',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; const retry=modal(vault,[{id:'a',name:'B'}]); await retry.preview(); retry.plan[0]!.changes!.find(c=>c.name==='name')!.selected=true; await retry.execute();
+ const entries=[...vault.journalFolders].filter(p=>/journals\/[0-9a-f-]{36}$/.test(p)); const batch=entries[entries.length-1]!.split('/').pop()!;
+ await journal.rollback(retry.app,batch); const later=vault.files.get(path)!.replace('name: A','name: B'); vault.files.set(path,later);
+ await journal.rollback(retry.app,batch); assert.equal(vault.files.get(path),later);
+});
+
+void test('matching JSON records reimport without duplicates after CSV',async()=>{
+ const {parseInput}=await import('../src/import-core');
+ const vault=new FakeVault(); const csv=modal(vault,parseInput('id,name\na,Alice\n','data.csv'));
+ csv.isCsv=true; csv.rawRows=parseInput('id,name\na,Alice\n','data.csv',{inferCsv:false}); await csv.preview(); await csv.execute();
+ const json=modal(vault,parseInput('[{"id":"a","name":"Alice"}]','data.json')); await json.preview();
+ assert.match(allText(json.contentEl),/New: 0; update: 0; skip: 1/); await json.execute();
+ const filename=await keyPath('a'); assert.equal([...vault.files.keys()].filter(p=>p.endsWith(filename)).length,1);
+});
+
+void test('a missing entry with a completion marker blocks rollback',async()=>{
+ const vault=new FakeVault(); const instance=modal(vault,[{id:'a',name:'A'}]); await instance.preview(); await instance.execute();
+ const batch=(await journal.listBatches(instance.app))[0]!.id;
+ const record=[...vault.journalFiles.keys()].find(p=>/[0-9a-f-]{36}\.json$/.test(p))!; vault.journalFiles.delete(record);
+ await assert.rejects(journal.rollback(instance.app,batch),/Missing journal record/);
+ assert.ok(vault.files.has(`Imported data/${await keyPath('a')}`));
 });

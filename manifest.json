@@ -1,7 +1,7 @@
 {
   "id": "bases-data-studio",
   "name": "Bases Data Studio",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "minAppVersion": "1.15.0",
   "description": "Import CSV and JSON records into notes and explore them with Bases.",
   "author": "xiaofeialen",

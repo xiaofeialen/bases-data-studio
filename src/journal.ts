@@ -1,7 +1,7 @@
 import { App, getFrontMatterInfo, Modal, Notice, parseYaml, TFile } from 'obsidian';
 
 export type JournalChange = {name:string; exists:boolean; before?:unknown; after:unknown};
-export type JournalEntry = {version:1; batch:string; id:string; kind:'create'|'update'; source:string; key:string; path:string; fingerprint:string; changes:JournalChange[]; content?:string};
+export type JournalEntry = {version:1; batch:string; id:string; kind:'create'|'update'; source:string; key:string; path:string; fingerprint:string; metadata?:{ctime:number;mtime:number;size:number}; changes:JournalChange[]; content?:string};
 const root = (app:App) => `${app.vault.configDir}/plugins/bases-data-studio/journals`;
 const equal = (a:unknown,b:unknown):boolean => JSON.stringify(a)===JSON.stringify(b);
 export async function fingerprint(content:string):Promise<string> {
@@ -27,7 +27,7 @@ export async function finishBatch(app:App,batch:string):Promise<void> {await wri
 function validEntry(value:unknown,batch:string):value is JournalEntry {
  if(!value || typeof value!=='object' || Array.isArray(value)) return false;
  const e=value as JournalEntry;
- return e.version===1 && e.batch===batch && typeof e.id==='string' && /^[\da-f-]{36}$/.test(e.id) && (e.kind==='create'||e.kind==='update') && typeof e.source==='string' && typeof e.key==='string' && typeof e.path==='string' && /^[\da-f]{64}$/.test(e.fingerprint) && Array.isArray(e.changes) && e.changes.every(c=>c && typeof c.name==='string' && c.name.length>0 && !/[\r\n]/.test(c.name) && !['bases_data_studio_key','bases_data_studio_source','bases_data_studio_batch','__proto__','constructor','prototype'].includes(c.name.toLowerCase()) && typeof c.exists==='boolean' && Object.prototype.hasOwnProperty.call(c,'after') && (!c.exists || Object.prototype.hasOwnProperty.call(c,'before'))) && (e.kind!=='create' || typeof e.content==='string');
+ return e.version===1 && e.batch===batch && typeof e.id==='string' && /^[\da-f-]{36}$/.test(e.id) && (e.kind==='create'||e.kind==='update') && typeof e.source==='string' && typeof e.key==='string' && typeof e.path==='string' && /^[\da-f]{64}$/.test(e.fingerprint) && (e.kind!=='update' || !!e.metadata && [e.metadata.ctime,e.metadata.mtime,e.metadata.size].every(n=>typeof n==='number' && Number.isFinite(n))) && Array.isArray(e.changes) && e.changes.every(c=>c && typeof c.name==='string' && c.name.length>0 && !/[\r\n]/.test(c.name) && !['bases_data_studio_key','bases_data_studio_source','bases_data_studio_batch','__proto__','constructor','prototype'].includes(c.name.toLowerCase()) && typeof c.exists==='boolean' && Object.prototype.hasOwnProperty.call(c,'after') && (!c.exists || Object.prototype.hasOwnProperty.call(c,'before'))) && (e.kind!=='create' || typeof e.content==='string');
 }
 export async function listBatches(app:App):Promise<{id:string;complete:boolean}[]> {
  if(!await app.vault.adapter.exists(root(app))) return [];
@@ -43,6 +43,11 @@ async function readEntries(app:App,batch:string):Promise<JournalEntry[]> {
  const dir=`${root(app)}/${batch}`; const listing=await app.vault.adapter.list(dir);
  const header=JSON.parse(await app.vault.adapter.read(`${dir}/batch.json`)) as {version?:unknown;batch?:unknown};
  if(header.version!==1 || header.batch!==batch) throw new Error('Invalid batch journal.');
+ const names=new Set(listing.files.map(path=>path.split('/').pop() ?? ''));
+ for(const name of names) {
+  const match=/^([\da-f-]{36})\.(?:done|rollback)$/.exec(name);
+  if(match && !names.has(`${match[1]}.json`)) throw new Error(`Missing journal record for ${name}.`);
+ }
  const entries:JournalEntry[]=[];
  for(const path of listing.files.sort()) {
   const name=path.split('/').pop() ?? ''; if(name==='batch.json'||name==='complete.json'||/^[\da-f-]{36}\.(?:done|rollback)$/.test(name)) continue;
@@ -80,7 +85,7 @@ async function inspect(app:App,entry:JournalEntry):Promise<RollbackResult> {
   const info=getFrontMatterInfo(content); const parsed:unknown=info.exists ? parseYaml(info.frontmatter) : null;
   const marker=parsed && typeof parsed==='object' && !Array.isArray(parsed) ? (parsed as Record<string,unknown>).bases_data_studio_batch : undefined;
   const safe=marker===entry.batch && content===entry.content && await fingerprint(content)===entry.fingerprint;
-  return {entry,message:safe ? `Unchanged created note: ${file.path}; delete manually after review.` : `Conflict: created note changed: ${file.path}`,actionable:false};
+  return {entry,message:safe ? `Move unchanged created note to local trash: ${file.path}` : `Conflict: created note changed: ${file.path}`,actionable:safe};
  }
  const info=getFrontMatterInfo(content); const props:unknown=info.exists ? parseYaml(info.frontmatter) : null;
  if(!props || typeof props!=='object' || Array.isArray(props)) return {entry,message:`Conflict: invalid frontmatter: ${file.path}`,actionable:false};
@@ -93,14 +98,31 @@ export async function previewRollback(app:App,batch:string):Promise<RollbackResu
  for(const entry of entries) {try {results.push(await inspect(app,entry));} catch(e) {results.push({entry,message:`Conflict: ${String(e)}`,actionable:false});}}
  return results;
 }
+const rollingBack = new Set<string>();
 export async function rollback(app:App,batch:string):Promise<string[]> {
+ if(rollingBack.has(batch)) throw new Error('Rollback for this batch is already running.');
+ rollingBack.add(batch);
+ try {return await rollbackBatch(app,batch);} finally {rollingBack.delete(batch);}
+}
+async function rollbackBatch(app:App,batch:string):Promise<string[]> {
  const entries=await readEntries(app,batch); const messages:string[]=[];
  for(const entry of entries) {
   try {
    const check=await inspect(app,entry); if(!check.actionable) {messages.push(check.message); continue;}
    const file=await findNote(app,entry); if(!file) {messages.push('Note disappeared; skipped.'); continue;}
+   if(entry.kind==='create') {
+    // Keep a recoverable copy in the vault trash, regardless of deletion preferences.
+    // A second check narrows the window between validation and trashing.
+    const latest=await inspect(app,entry);
+    if(!latest.actionable || await app.vault.read(file)!==entry.content) {messages.push(`Conflict: ${file.path} changed; not trashed.`); continue;}
+    await writeRecord(app,`${root(app)}/${entry.batch}/${entry.id}.rollback`,{version:1,batch:entry.batch,id:entry.id});
+    if((await findNote(app,entry))?.path!==file.path || await app.vault.read(file)!==entry.content) {messages.push(`Conflict: ${file.path} changed; not trashed.`); continue;}
+    await app.vault.trash(file,false);
+    messages.push(`Moved ${file.path} to the vault trash.`);
+    continue;
+   }
    await writeRecord(app,`${root(app)}/${entry.batch}/${entry.id}.rollback`,{version:1,batch:entry.batch,id:entry.id});
-    const conflicts:string[]=[];
+   const conflicts:string[]=[];
     await app.fileManager.processFrontMatter(file,frontmatter=>{
      const props=frontmatter as Record<string,unknown>;
      if(String(props.bases_data_studio_key)!==entry.key || props.bases_data_studio_source!==entry.source) throw new Error('Identity changed.');

@@ -153,7 +153,7 @@ export class ImportModal extends Modal {
      try {
       const content=await this.app.vault.read(file);
       const id=crypto.randomUUID();
-      await recordEntry(this.app,{version:1,batch,id,kind:'update',source:this.folder,key:item.key,path:item.path,fingerprint:await fingerprint(content),changes:selected.map(c=>({name:c.name,exists:c.exists,...(c.exists ? {before:c.before} : {}),after:c.after}))});
+      await recordEntry(this.app,{version:1,batch,id,kind:'update',source:this.folder,key:item.key,path:item.path,metadata:{ctime:file.stat.ctime,mtime:file.stat.mtime,size:file.stat.size},fingerprint:await fingerprint(content),changes:selected.map(c=>({name:c.name,exists:c.exists,...(c.exists ? {before:c.before} : {}),after:c.after}))});
       await this.app.fileManager.processFrontMatter(file, frontmatter=>{
        const props=frontmatter as Record<string,unknown>;
        if(String(props.bases_data_studio_key)!==item.key || props.bases_data_studio_source!==this.folder) throw new Error('Identity changed after preview.');

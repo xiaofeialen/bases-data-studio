@@ -32,7 +32,7 @@ Future work includes richer conflict resolution, reversible updates, synchroniza
 
 Create a GitHub release with a tag matching the manifest version and attach `main.js`, `manifest.json`, and `styles.css`. Submit the repository through the [Obsidian Community Directory](https://community.obsidian.md) after reviewing its requirements.
 
-### Import journals and rollback (work in progress)
+### Import journals and rollback
 
 Each import writes a journal under the vault's configuration directory at
 `plugins/bases-data-studio/journals/`. The journal contains file paths, import
@@ -49,10 +49,11 @@ or failed attempt requires manual inspection rather than an automatic retry.
 Operations without a completion record are also left for manual review. Do not
 edit journal files. Missing or malformed journals cannot be used for recovery.
 
-Created notes are currently reported for manual review and are not deleted by
-the command. Obsidian does not expose an atomic compare-and-delete operation;
-a separate content check and deletion could discard an edit made between those
-steps. Also, Obsidian's adapter does not expose a filesystem flush guarantee, so
+Unchanged created notes with an unambiguous batch marker are moved to the
+vault trash after a fresh content check. Obsidian does not expose an atomic
+compare-and-delete operation: a concurrent edit between the check and trash
+operation can be moved to trash too. Restore the note from the vault trash if
+that happens. Also, Obsidian's adapter does not expose a filesystem flush guarantee, so
 read-back verification cannot guarantee recovery from a sudden power loss.
 Keep independent backups. Close other Obsidian windows and sync clients while
 importing or rolling back; this implementation does not coordinate across
@@ -65,6 +66,9 @@ select an update and import it, then edit one property and the note body. Run
 **Inspect and roll back import batches**, review the latest batch, and verify
 that edited properties and body remain untouched while unchanged selected
 properties revert. Repeat rollback; move a created note and inspect its batch;
-check that the note is reported for manual review. Repeat using JSON, a missing
-note, and a legacy note. Restore the backup after testing. These are reproducible
-steps, not a claim that this work-in-progress build has passed manual testing.
+check that the unchanged note moves to the vault trash. Repeat using JSON, a missing
+note, and a legacy note. Restore the backup after testing. Manual verification on Obsidian 1.15.1 with a separate backup covered repeated CSV preview, JSON update and property rollback, a moved unchanged note, and preservation of an edited note, body, and unrelated property.
+
+### 0.4.0 release notes
+
+Adds import batch journals, batch inspection, conflict-aware rollback and regression tests. Incomplete operations require manual inspection. Created notes are moved to the vault trash only after identity and content checks.
