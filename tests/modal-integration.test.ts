@@ -33,7 +33,7 @@ class FakeVault {
  getAbstractFileByPath(path: string): object | null {return this.files.has(path) ? {path,extension:path.endsWith('.md')?'md':''} : this.folders.has(path) ? {path} : null;}
  getFileByPath(path: string): object | null {return this.files.has(path) ? {path,extension:path.endsWith('.md')?'md':''} : null;}
  getMarkdownFiles(): {path:string}[] {return [...this.files.keys()].filter(path=>path.endsWith('.md')).map(path=>({path}));}
- async cachedRead(file: {path:string}): Promise<string> {if(file.path===this.failReadPath) throw Error('injected read failure'); const text=this.files.get(file.path); if(text===undefined) throw Error('missing file'); return text;}
+ async read(file: {path:string}): Promise<string> {if(file.path===this.failReadPath) throw Error('injected read failure'); const text=this.files.get(file.path); if(text===undefined) throw Error('missing file'); return text;}
  async createFolder(path: string): Promise<void> {if(this.getAbstractFileByPath(path)) throw Error('already exists'); this.folders.add(path);}
  async create(path: string, content: string): Promise<void> {if(path === this.failPath) throw Error('injected write failure'); if(this.getAbstractFileByPath(path)) throw Error('already exists'); this.files.set(path,content);}
 }
@@ -193,4 +193,22 @@ void test('an update refuses a changed identity and never partially applies sele
  retry.plan[0]!.changes!.find(c=>c.name==='name')!.selected=true;
  const edited=vault.files.get(path)!.replace('"bases_data_studio_source": "Imported data"','"bases_data_studio_source": "Other data"'); vault.files.set(path,edited);
  await retry.execute(); assert.equal(vault.files.get(path),edited);
+});
+
+void test('duplicate provenance keys are conflicts even when one note was moved',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; const original=vault.files.get(path)!;
+ vault.files.set('Moved copy.md',original);
+ const retry=modal(vault,[{id:'a',name:'B'}]); await retry.preview();
+ assert.match(allText(retry.contentEl),/Multiple notes have this key/);
+ await retry.execute(); assert.equal(vault.files.get(path),original); assert.equal(vault.files.get('Moved copy.md'),original);
+});
+
+void test('a note removed after update preview is not recreated or modified',async()=>{
+ const vault=new FakeVault(); const first=modal(vault,[{id:'a',name:'A'}]); await first.preview(); await first.execute();
+ const path=`Imported data/${await keyPath('a')}`; const retry=modal(vault,[{id:'a',name:'B'}]); await retry.preview();
+ retry.plan[0]!.changes!.find(change=>change.name==='name')!.selected=true;
+ vault.files.delete(path); await retry.execute();
+ assert.equal(vault.files.has(path),false);
+ assert.ok(notices.some(message=>message.includes('1 errors')));
 });

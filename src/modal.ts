@@ -98,7 +98,7 @@ export class ImportModal extends Modal {
  private async indexNotes():Promise<Existing[]> {
   const records:Existing[]=[];
   for(const file of this.app.vault.getMarkdownFiles()) {
-   const content=await this.app.vault.cachedRead(file);
+   const content=await this.app.vault.read(file);
    if (!content.includes('bases_data_studio_key')) continue;
    const info=getFrontMatterInfo(content); if(!info.exists) continue;
    if(!/(?:^|\n)\s*(?:"bases_data_studio_key"|'bases_data_studio_key'|bases_data_studio_key)\s*:/.test(info.frontmatter)) continue;
